@@ -364,11 +364,20 @@ cdef class VRTReaderBase(DatasetReaderBase):
                  vrt_nodata=DEFAULT_NODATA_FLAG,
                  allow_projection_difference=False):
 
+        _src_datasets = []
+
         for src_ds in src_datasets:
-            if src_ds.mode != "r":
-                warnings.warn(
-                    f"Source dataset {src_ds.name} should be opened in read-only mode. Use of datasets opened in modes other than 'r' will be disallowed in a future version.",
-                    RasterioDeprecationWarning, stacklevel=2)
+            _src_ds = None
+            if isinstance(src_ds, str):
+                _src_ds = rasterio.open(src_ds)
+            elif isinstance(src_ds, DatasetReaderBase):
+                if src_ds.mode != "r":
+                    raise RuntimeError("The non-reading mode is not allowed")
+                _src_ds = src_ds
+            else:
+                raise RuntimeError(f"The {src_ds} is not a valid string or rio file")
+            _src_datasets.append(_src_ds)
+
 
         # Guard against invalid or unsupported resampling algorithms.
         try:
@@ -397,11 +406,11 @@ cdef class VRTReaderBase(DatasetReaderBase):
             warnings.warn("Alpha addition not supported by GDAL 1.x")
             add_alpha = False
 
-        self.src_datasets = src_datasets
+        self.src_datasets = _src_datasets
         self.resolution = resolution
         self.name = f"VRT {randomword(10)}"
         self.resampling = Resampling.nearest
-        self.src_nodata = self.src_datasets[0].nodata if src_nodata is DEFAULT_NODATA_FLAG else src_nodata
+        self.src_nodata = self._src_datasets[0].nodata if src_nodata is DEFAULT_NODATA_FLAG else src_nodata
         self.vrt_nodata = self.src_nodata if vrt_nodata is DEFAULT_NODATA_FLAG else vrt_nodata
         self.output_bounds = None
         self.x_res = None
@@ -417,11 +426,10 @@ cdef class VRTReaderBase(DatasetReaderBase):
 
         cdef GDALDatasetH* hds_list = NULL
         hds_list = <GDALDatasetH*>CPLMalloc(
-            len(src_datasets) * sizeof(GDALDatasetH)
+            len(_src_datasets) * sizeof(GDALDatasetH)
         )
-        for i, dataset in enumerate(src_datasets):
-            hds_ptr = (<DatasetReaderBase?> src_datasets[i]).handle()
-            print(i)
+        for i, dataset in enumerate(_src_datasets):
+            hds_ptr = (<DatasetReaderBase?> _src_datasets[i]).handle()
             if hds_ptr == NULL:
                 raise RuntimeError("Dataset is NULL")
             hds_list[i] = hds_ptr
@@ -488,10 +496,6 @@ cdef class VRTReaderBase(DatasetReaderBase):
         else:
             return super().read_masks(indexes=indexes, out=out, window=window, out_shape=out_shape,
                                           resampling=resampling)
-
-    def save(self, filename):
-        GDALFlushCache(self._hds)
-        os.rename(self.vrt_filename, filename)
 
 
 
