@@ -1,16 +1,30 @@
 """rasterio.vrt: a module concerned with GDAL VRTs"""
+import logging
+import os
+import random
+import string
+import warnings
+from contextlib import ExitStack
+
+from rasterio import gdal_version
+from rasterio._err import CPLE_OpenFailedError
+from rasterio._io cimport DatasetReaderBase
+
+include "gdal.pxi"
 
 import xml.etree.ElementTree as ET
 
 import rasterio._loading
 with rasterio._loading.add_gdal_dll_directories():
     import rasterio
-    from rasterio._warp import WarpedVRTReaderBase
+    from rasterio._warp import WarpedVRTReaderBase, DEFAULT_NODATA_FLAG, RasterioDeprecationWarning, \
+    SUPPORTED_RESAMPLING, RasterioIOError
     from rasterio.dtypes import _gdal_typename
-    from rasterio.enums import MaskFlags
+    from rasterio.enums import MaskFlags, Resampling
     from rasterio.path import parse_path
     from rasterio.transform import TransformMethodsMixin
     from rasterio.windows import WindowMethodsMixin
+    from rasterio._string import _strHighPrec
 
 
 class WarpedVRT(WarpedVRTReaderBase, WindowMethodsMixin,
@@ -122,6 +136,7 @@ class WarpedVRT(WarpedVRTReaderBase, WindowMethodsMixin,
         if not self._closed:
             self.close()
 
+log = logging.getLogger(__name__)
 
 def _boundless_vrt_doc(
         src_dataset, nodata=None, background=None, hidenodata=False,
@@ -247,3 +262,254 @@ def _boundless_vrt_doc(
         dstrect.attrib['ySize'] = str(src_dataset.height)
 
     return ET.tostring(vrtdataset).decode('ascii')
+
+def form_vrt_options(resolution=None,
+                     outputBounds=None,
+                     xRes=None, yRes=None,
+                     targetAlignedPixels=None,
+                     separate=None,
+                     bandList=None,
+                     addAlpha=None,
+                     resampleAlg=None,
+                     outputSRS=None,
+                     allowProjectionDifference=None,
+                     srcNodata=None,
+                     VRTNodata=None,
+                     hideNodata=None):
+    options = []
+    if resolution is not None:
+        options += ['-resolution', str(resolution)]
+    if outputBounds is not None:
+        options += ['-te', _strHighPrec(outputBounds[0]), _strHighPrec(outputBounds[1]),
+                    _strHighPrec(outputBounds[2]), _strHighPrec(outputBounds[3])]
+    if xRes is not None and yRes is not None:
+        options += ['-tr', _strHighPrec(xRes), _strHighPrec(yRes)]
+    if targetAlignedPixels:
+        options += ['-tap']
+    if separate:
+        options += ['-separate']
+    if bandList is not None:
+        for b in bandList:
+            options += ['-b', str(b)]
+    if addAlpha:
+        options += ['-addalpha']
+    if resampleAlg is not None:
+        if resampleAlg == GDALRIOResampleAlg.GRIORA_NearestNeighbour:
+            options += ['-r', 'near']
+        elif resampleAlg == GDALRIOResampleAlg.GRIORA_Bilinear:
+            options += ['-rb']
+        elif resampleAlg == GDALRIOResampleAlg.GRIORA_Cubic:
+            options += ['-rc']
+        elif resampleAlg == GDALRIOResampleAlg.GRIORA_CubicSpline:
+            options += ['-rcs']
+        elif resampleAlg == GDALRIOResampleAlg.GRIORA_Lanczos:
+            options += ['-r', 'lanczos']
+        elif resampleAlg == GDALRIOResampleAlg.GRIORA_Average:
+            options += ['-r', 'average']
+        elif resampleAlg == GDALRIOResampleAlg.GRIORA_Mode:
+            options += ['-r', 'mode']
+        elif resampleAlg == GDALRIOResampleAlg.GRIORA_Gauss:
+            options += ['-r', 'gauss']
+        else:
+            options += ['-r', str(resampleAlg)]
+    if outputSRS is not None:
+        options += ['-a_srs', str(outputSRS)]
+    if allowProjectionDifference:
+        options += ['-allow_projection_difference']
+    if srcNodata is not None:
+        options += ['-srcnodata', str(srcNodata)]
+    if VRTNodata is not None:
+        options += ['-vrtnodata', str(VRTNodata)]
+    if hideNodata:
+        options += ['-hidenodata']
+    options_str = " ".join(options)
+    options_str_enc = options_str.encode('utf-8')
+    return options_str_enc
+
+
+cdef GDALBuildVRTOptions* build_vrt_options(char** papszArgv, GDALBuildVRTOptionsForBinary* psOptionsForBinary) except NULL:
+
+    cdef GDALBuildVRTOptions* vrt_options = NULL
+
+    with nogil:
+        vrt_options = GDALBuildVRTOptionsNew(papszArgv, psOptionsForBinary)
+    return vrt_options
+
+def randomword(length):
+   letters = string.ascii_lowercase
+   return ''.join(random.choice(letters) for i in range(length))
+
+
+cdef GDALDatasetH build_vrt(const char *pszDest, int nSrcCount, GDALDatasetH *pahSrcDS, const char *const *papszSrcDSNames, const GDALBuildVRTOptions *psOptions) except NULL:
+    cdef int pbUsageError = <int>0
+    cdef GDALDatasetH hds_vrt = NULL
+    with nogil:
+        hds_vrt = GDALBuildVRT(pszDest,
+                               nSrcCount,
+                               pahSrcDS,
+                               papszSrcDSNames,
+                               psOptions,
+                               &pbUsageError)
+    return hds_vrt
+
+
+cdef class VRTReaderBase(DatasetReaderBase):
+    def __init__(self,
+                 src_datasets,
+                 resolution='average',
+                 add_alpha=False,
+                 separate=False,
+                 resampling=Resampling.nearest,
+                 src_nodata=DEFAULT_NODATA_FLAG,
+                 vrt_nodata=DEFAULT_NODATA_FLAG,
+                 allow_projection_difference=False):
+
+        for src_ds in src_datasets:
+            if src_ds.mode != "r":
+                warnings.warn(
+                    f"Source dataset {src_ds.name} should be opened in read-only mode. Use of datasets opened in modes other than 'r' will be disallowed in a future version.",
+                    RasterioDeprecationWarning, stacklevel=2)
+
+        # Guard against invalid or unsupported resampling algorithms.
+        try:
+            if resampling == 7:
+                raise ValueError("Gauss resampling is not supported")
+            Resampling(resampling)
+        except ValueError:
+            raise ValueError(
+                "resampling must be one of: {0}".format(
+                    ", ".join(['Resampling.{0}'.format(r.name) for r in SUPPORTED_RESAMPLING])))
+
+        self.mode = 'r'
+        self.options = {}
+        self._count = 0
+        self._closed = True
+        self._dtypes = []
+        self._block_shapes = None
+        self._nodatavals = []
+        self._units = ()
+        self._descriptions = ()
+        self._crs = None
+        self._gcps = None
+        self._read = False
+
+        if add_alpha and gdal_version().startswith('1'):
+            warnings.warn("Alpha addition not supported by GDAL 1.x")
+            add_alpha = False
+
+        self.src_datasets = src_datasets
+        self.resolution = resolution
+        self.name = f"VRT {randomword(10)}"
+        self.resampling = Resampling.nearest
+        self.src_nodata = self.src_datasets[0].nodata if src_nodata is DEFAULT_NODATA_FLAG else src_nodata
+        self.vrt_nodata = self.src_nodata if vrt_nodata is DEFAULT_NODATA_FLAG else vrt_nodata
+        self.output_bounds = None
+        self.x_res = None
+        self.y_res = None
+        self.target_aligned_pixels = None
+        self.output_srs = None
+        self.hide_nodata = None
+        self.band_list = None
+        self.vrt_filename = f"{self.name}.vrt"
+
+        cdef GDALDriverH driver = NULL
+        cdef GDALBuildVRTOptions * vrt_options = NULL
+
+        cdef GDALDatasetH* hds_list = NULL
+        hds_list = <GDALDatasetH*>CPLMalloc(
+            len(src_datasets) * sizeof(GDALDatasetH)
+        )
+        for i, dataset in enumerate(src_datasets):
+            hds_ptr = (<DatasetReaderBase?> src_datasets[i]).handle()
+            print(i)
+            if hds_ptr == NULL:
+                raise RuntimeError("Dataset is NULL")
+            hds_list[i] = hds_ptr
+        str_vrt_options = form_vrt_options(resolution=self.resolution,
+                                           outputBounds=self.output_bounds,
+                                           xRes=self.x_res,
+                                           yRes=self.y_res,
+                                           targetAlignedPixels=self.target_aligned_pixels,
+                                           separate=separate,
+                                           bandList=self.band_list,
+                                           addAlpha=add_alpha,
+                                           resampleAlg=self.resampling,
+                                           outputSRS=self.output_srs,
+                                           allowProjectionDifference=allow_projection_difference,
+                                           srcNodata=self.src_nodata,
+                                           VRTNodata=self.vrt_nodata,
+                                           hideNodata=self.hide_nodata)
+
+        str_vrt_options_ptr = CSLParseCommandLine(str_vrt_options)
+        if str_vrt_options_ptr == NULL:
+            raise RuntimeError("String VRT options are NULL")
+        vrt_options = build_vrt_options(str_vrt_options_ptr, NULL)
+
+        if vrt_options == NULL:
+            raise RuntimeError("VRT options are NULL")
+
+
+        try:
+            hds_vrt = build_vrt(pszDest=self.vrt_filename.encode('utf-8'),
+                                nSrcCount=len(self.src_datasets),
+                                pahSrcDS=hds_list,
+                                papszSrcDSNames=NULL,
+                                psOptions=vrt_options)
+        finally:
+            CSLDestroy(str_vrt_options_ptr)
+            if vrt_options != NULL:
+              GDALBuildVRTOptionsFree(vrt_options)
+
+        try:
+            if hds_vrt == NULL:
+                raise RuntimeError("VRT is NULL")
+            self._hds = hds_vrt
+        except CPLE_OpenFailedError as err:
+            raise RasterioIOError(err.errmsg)
+
+        self._set_attrs_from_dataset_handle()
+
+        self._env = ExitStack()
+        self._closed = False
+
+    def read(self, indexes=None, out=None, window=None, masked=False, out_shape=None, resampling=Resampling.nearest,
+                fill_value=None, out_dtype=None, **kwargs):
+        if kwargs.get("boundless", False):
+            raise ValueError("WarpedVRT does not permit boundless reads")
+        else:
+            return super().read(indexes=indexes, out=out, window=window, masked=masked, out_shape=out_shape,
+                                    resampling=resampling, fill_value=fill_value, out_dtype=out_dtype)
+
+    def read_masks(self, indexes=None, out=None, out_shape=None, window=None, resampling=Resampling.nearest,
+                       **kwargs):
+        """Read raster band masks as a multidimensional array"""
+        if kwargs.get("boundless", False):
+            raise ValueError("WarpedVRT does not permit boundless reads")
+        else:
+            return super().read_masks(indexes=indexes, out=out, window=window, out_shape=out_shape,
+                                          resampling=resampling)
+
+    def save(self, filename):
+        GDALFlushCache(self._hds)
+        os.rename(self.vrt_filename, filename)
+
+
+
+
+class VRT(VRTReaderBase):
+
+    def __repr__(self):
+        return "<{} VRT name='{}' mode='{}'>".format(
+            self.closed and 'closed' or 'open', self.name, self.mode)
+
+    def __enter__(self):
+        self.start()
+        return self
+
+    def __exit__(self, *args, **kwargs):
+        if not self._closed:
+            self.close()
+
+    def __del__(self):
+        if not self._closed:
+            self.close()

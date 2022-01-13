@@ -243,7 +243,13 @@ if "clean" not in sys.argv:
         Extension(
             'rasterio.shutil', ['rasterio/shutil.pyx'], **ext_options),
         Extension(
-            'rasterio._transform', ['rasterio/_transform.pyx'], **ext_options)]
+            'rasterio._transform', ['rasterio/_transform.pyx'], **ext_options),
+        Extension(
+            'rasterio._string', ['rasterio/_string.pyx'], **ext_options),
+        Extension(
+            'rasterio.vrt', ['rasterio/vrt.pyx'], **ext_options)
+    ]
+
     if gdal_major_version >= 3:
         # VSI Plugins are only 3.0+
         extensions.append(

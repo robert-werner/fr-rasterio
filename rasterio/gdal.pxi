@@ -6,11 +6,15 @@ from libc.stdio cimport FILE
 cdef extern from "cpl_conv.h" nogil:
 
     void *CPLMalloc(size_t)
+    void *CPLCalloc(size_t, size_t)
+    void *CPLRealloc(void*, size_t)
     void CPLFree(void* ptr)
     void CPLSetThreadLocalConfigOption(const char* key, const char* val)
     void CPLSetConfigOption(const char* key, const char* val)
     const char *CPLGetConfigOption(const char* key, const char* default)
     const char *CPLFindFile(const char *pszClass, const char *pszBasename)
+    char **CSLParseCommandLine(const char *pszCommandLine)
+
 
 
 cdef extern from "cpl_error.h" nogil:
@@ -526,6 +530,7 @@ cdef extern from "ogr_api.h" nogil:
     int OGR_G_GetPointCount(OGRGeometryH geometry)
     double OGR_G_GetX(OGRGeometryH geometry, int n)
     double OGR_G_GetY(OGRGeometryH geometry, int n)
+    double OGR_G_GetY(OGRGeometryH geometry, int n)
     double OGR_G_GetZ(OGRGeometryH geometry, int n)
     void OGR_G_ImportFromWkb(OGRGeometryH geometry, unsigned char *bytes,
                              int nbytes)
@@ -713,3 +718,22 @@ cdef extern from "gdal_alg.h" nogil:
 cdef extern from "ogr_core.h" nogil:
 
     char *OGRGeometryTypeToName(int type)
+
+cdef extern from "gdal_utils.h" nogil:
+
+    cdef struct GDALBuildVRTOptions
+    cdef struct GDALBuildVRTOptionsForBinary
+    ctypedef GDALBuildVRTOptions GDALBuildVRTOptions
+    ctypedef GDALBuildVRTOptionsForBinary GDALBuildVRTOptionsForBinary
+
+    GDALBuildVRTOptions* GDALBuildVRTOptionsNew(char** papszArgv, GDALBuildVRTOptionsForBinary* psOptionsForBinary);
+
+    void GDALBuildVRTOptionsFree(GDALBuildVRTOptions *psOptions)
+
+    void GDALBuildVRTOptionsSetProgress(GDALBuildVRTOptions *psOptions,
+                                   GDALProgressFunc pfnProgress,
+                                   void *pProgressData)
+
+    GDALDatasetH GDALBuildVRT(const char *pszDest, int nSrcCount,
+                              GDALDatasetH *pahSrcDS, const char *const *papszSrcDSNames,
+                              const GDALBuildVRTOptions *psOptions, int *pbUsageError)
