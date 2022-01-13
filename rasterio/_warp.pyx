@@ -386,7 +386,7 @@ def _reproject(
                                          transform=format_transform(src_transform),
                                          gcps=gcps,
                                          rpcs=rpcs,
-                                         crs=src_crs, 
+                                         crs=src_crs,
                                          copy=True)
             src_dataset = src_mem.handle()
 
@@ -957,6 +957,40 @@ cdef class WarpedVRTReaderBase(DatasetReaderBase):
         cdef int mask_block_ysize = 0
 
         hds = exc_wrap_pointer((<DatasetReaderBase?>self.src_dataset).handle())
+
+        if not self.src_transform:
+            self.src_transform = self.src_dataset.transform
+
+        if not self.src_crs and self.src_transform.almost_equals(identity):
+            try:
+                self.src_gcps, self.src_crs = self.src_dataset.get_gcps()
+            except ValueError:
+                pass
+
+        self.dst_crs = CRS.from_user_input(crs) if crs is not None else self.src_crs
+
+        # Convert CRSes to C WKT strings.
+        try:
+            if not self.src_crs:
+                src_crs_wkt = NULL
+            else:
+                osr = _osr_from_crs(self.src_crs)
+                OSRExportToWkt(osr, &src_crs_wkt)
+        finally:
+            if osr != NULL:
+                OSRRelease(osr)
+            osr = NULL
+
+        if self.dst_crs is not None:
+            try:
+                osr = _osr_from_crs(self.dst_crs)
+                OSRExportToWkt(osr, &dst_crs_wkt)
+            finally:
+                _safe_osr_release(osr)
+
+        log.debug("Exported CRS to WKT.")
+
+        log.debug("Warp_extras: %r", self.warp_extras)
 
         for key, val in self.warp_extras.items():
             key = key.upper().encode('utf-8')
