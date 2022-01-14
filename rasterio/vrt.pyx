@@ -362,7 +362,16 @@ cdef class VRTReaderBase(DatasetReaderBase):
                  resampling=Resampling.nearest,
                  src_nodata=DEFAULT_NODATA_FLAG,
                  vrt_nodata=DEFAULT_NODATA_FLAG,
-                 allow_projection_difference=False):
+                 allow_projection_difference=False,
+                 vrt_filename=None,
+                 save_after_close=False):
+
+        self.name = f"VRT {randomword(10)}"
+        self.save_after_close = save_after_close
+        if vrt_filename is None:
+            self.vrt_filename = f"{self.name}.vrt"
+        else:
+            self.vrt_filename = vrt_filename
 
         _src_datasets = []
 
@@ -408,7 +417,6 @@ cdef class VRTReaderBase(DatasetReaderBase):
 
         self.src_datasets = _src_datasets
         self.resolution = resolution
-        self.name = f"VRT {randomword(10)}"
         self.resampling = Resampling.nearest
         self.src_nodata = self._src_datasets[0].nodata if src_nodata is DEFAULT_NODATA_FLAG else src_nodata
         self.vrt_nodata = self.src_nodata if vrt_nodata is DEFAULT_NODATA_FLAG else vrt_nodata
@@ -419,7 +427,6 @@ cdef class VRTReaderBase(DatasetReaderBase):
         self.output_srs = None
         self.hide_nodata = None
         self.band_list = None
-        self.vrt_filename = f"{self.name}.vrt"
 
         cdef GDALDriverH driver = NULL
         cdef GDALBuildVRTOptions * vrt_options = NULL
@@ -467,7 +474,8 @@ cdef class VRTReaderBase(DatasetReaderBase):
             CSLDestroy(str_vrt_options_ptr)
             if vrt_options != NULL:
               GDALBuildVRTOptionsFree(vrt_options)
-
+            for __src_ds in _src_datasets:
+                __src_ds.close()
         try:
             if hds_vrt == NULL:
                 raise RuntimeError("VRT is NULL")
@@ -513,6 +521,9 @@ class VRT(VRTReaderBase):
     def __exit__(self, *args, **kwargs):
         if not self._closed:
             self.close()
+        if not self.save_after_close:
+          if os.path.exists(self.vrt_filename):
+              os.remove(self.vrt_filename)
 
     def __del__(self):
         if not self._closed:
