@@ -294,7 +294,7 @@ extra_reqs = {
 extra_reqs["all"] = list(set(itertools.chain(*extra_reqs.values())))
 
 setup_args = dict(
-    name="rasterio",
+    name="fr-rasterio",
     version=version,
     description="Fast and direct raster I/O for use with Numpy and SciPy",
     long_description=readme,
