@@ -490,25 +490,18 @@ cdef class VRTReaderBase(DatasetReaderBase):
 
     def read(self, indexes=None, out=None, window=None, masked=False, out_shape=None, resampling=Resampling.nearest,
                 fill_value=None, out_dtype=None, **kwargs):
-        if kwargs.get("boundless", False):
-            raise ValueError("WarpedVRT does not permit boundless reads")
-        else:
-            return super().read(indexes=indexes, out=out, window=window, masked=masked, out_shape=out_shape,
+        return super().read(indexes=indexes, out=out, window=window, masked=masked, out_shape=out_shape,
                                     resampling=resampling, fill_value=fill_value, out_dtype=out_dtype)
 
     def read_masks(self, indexes=None, out=None, out_shape=None, window=None, resampling=Resampling.nearest,
                        **kwargs):
-        """Read raster band masks as a multidimensional array"""
-        if kwargs.get("boundless", False):
-            raise ValueError("WarpedVRT does not permit boundless reads")
-        else:
-            return super().read_masks(indexes=indexes, out=out, window=window, out_shape=out_shape,
+        return super().read_masks(indexes=indexes, out=out, window=window, out_shape=out_shape,
                                           resampling=resampling)
 
 
 
 
-class VRT(VRTReaderBase):
+class VRT(VRTReaderBase, WindowMethodsMixin, TransformMethodsMixin):
 
     def __repr__(self):
         return "<{} VRT name='{}' mode='{}'>".format(
