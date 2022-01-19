@@ -10,6 +10,8 @@ from rasterio import gdal_version
 from rasterio._err import CPLE_OpenFailedError
 from rasterio._io cimport DatasetReaderBase
 
+from rasterio.errors import NotGeoreferencedWarning
+
 include "gdal.pxi"
 
 import xml.etree.ElementTree as ET
@@ -265,7 +267,7 @@ def _boundless_vrt_doc(
 
 def form_vrt_options(resolution=None,
                      outputBounds=None,
-                     xRes=None, yRes=None,
+                     targetResolution=None,
                      targetAlignedPixels=None,
                      separate=None,
                      bandList=None,
@@ -275,19 +277,43 @@ def form_vrt_options(resolution=None,
                      allowProjectionDifference=None,
                      srcNodata=None,
                      VRTNodata=None,
-                     hideNodata=None):
+                     hideNodata=None,
+                     tileIndex=None,
+                     subDs=None,
+                     **kwargs):
     options = []
+    if resolution == 'user':
+        if targetResolution is None:
+            raise RuntimeError("The target resolution must be indicated when resolution is 'user'")
+    else:
+        if resolution is not None:
+            if targetResolution is not None:
+                raise RuntimeError(f"Target resolution and resolution '{resolution}' are not compatible options")
+        if resolution is None:
+            if targetResolution is not None:
+                resolution = 'user'
+            else:
+                resolution = 'average'
+    if targetResolution is None and targetAlignedPixels is not None:
+        raise RuntimeError("Target aligned pixels must be mixed with target resolution")
+    if separate is True and addAlpha is True:
+        raise RuntimeError("Separate and addAlpha are not compatible options")
+    if tileIndex is not None:
+        options += ['-tileindex', str(tileIndex)]
     if resolution is not None:
         options += ['-resolution', str(resolution)]
+
     if outputBounds is not None:
         options += ['-te', _strHighPrec(outputBounds[0]), _strHighPrec(outputBounds[1]),
                     _strHighPrec(outputBounds[2]), _strHighPrec(outputBounds[3])]
-    if xRes is not None and yRes is not None:
-        options += ['-tr', _strHighPrec(xRes), _strHighPrec(yRes)]
+    if targetResolution is not None:
+        options += ['-tr', _strHighPrec(targetResolution[0]), _strHighPrec(targetResolution[1])]
     if targetAlignedPixels:
         options += ['-tap']
     if separate:
         options += ['-separate']
+    if subDs:
+        options += ['-sd', str(subDs)]
     if bandList is not None:
         for b in bandList:
             options += ['-b', str(b)]
@@ -317,9 +343,15 @@ def form_vrt_options(resolution=None,
     if allowProjectionDifference:
         options += ['-allow_projection_difference']
     if srcNodata is not None:
-        options += ['-srcnodata', str(srcNodata)]
+        if isinstance(srcNodata, int):
+            options += ['-srcnodata', str(srcNodata)]
+        if isinstance(srcNodata, list) or isinstance(srcNodata, tuple):
+            options += ['-srcnodata', f'{" ".join([str(nodata) for nodata in srcNodata])}']
     if VRTNodata is not None:
-        options += ['-vrtnodata', str(VRTNodata)]
+        if isinstance(VRTNodata, int):
+            options += ['-vrtnodata', str(VRTNodata)]
+        if isinstance(VRTNodata, list) or isinstance(VRTNodata, tuple):
+            options += ['-vrtnodata', f'{" ".join([str(nodata) for nodata in VRTNodata])}']
     if hideNodata:
         options += ['-hidenodata']
     options_str = " ".join(options)
@@ -356,7 +388,7 @@ cdef GDALDatasetH build_vrt(const char *pszDest, int nSrcCount, GDALDatasetH *pa
 cdef class VRTReaderBase(DatasetReaderBase):
     def __init__(self,
                  src_datasets,
-                 resolution='average',
+                 resolution=None,
                  add_alpha=False,
                  separate=False,
                  resampling=Resampling.nearest,
@@ -364,7 +396,15 @@ cdef class VRTReaderBase(DatasetReaderBase):
                  vrt_nodata=DEFAULT_NODATA_FLAG,
                  allow_projection_difference=False,
                  vrt_filename=None,
-                 save_after_close=False):
+                 target_aligned_pixels=None,
+                 output_srs=None,
+                 target_resolution=None,
+                 output_bounds=None,
+                 save_after_close=False,
+                 bands=None,
+                 tile_index=None,
+                 subdataset=None,
+                 hide_nodata=None):
 
         self.name = f"VRT {randomword(10)}"
         self.save_after_close = save_after_close
@@ -373,20 +413,42 @@ cdef class VRTReaderBase(DatasetReaderBase):
         else:
             self.vrt_filename = vrt_filename
 
-        _src_datasets = []
+        self._src_datasets = []
 
-        for src_ds in src_datasets:
+        if not isinstance(src_datasets, list):
             _src_ds = None
-            if isinstance(src_ds, str):
-                _src_ds = rasterio.open(src_ds)
-            elif isinstance(src_ds, DatasetReaderBase):
-                if src_ds.mode != "r":
-                    raise RuntimeError("The non-reading mode is not allowed")
-                _src_ds = src_ds
+            if isinstance(src_datasets, str):
+                with warnings.catch_warnings():
+                    warnings.filterwarnings('error')
+                    try:
+                        _src_ds = rasterio.open(src_datasets)
+                    except NotGeoreferencedWarning:
+                        raise RuntimeError(f"The dataset at {src_datasets} is ungeoreferenced, which is not allowed for building VRTs.") from None
+            elif isinstance(src_datasets, DatasetReaderBase):
+                if src_datasets.mode != "r":
+                    raise RuntimeError("The non-reading mode is not allowed") from None
+                _src_ds = src_datasets
             else:
-                raise RuntimeError(f"The {src_ds} is not a valid string or rio file")
-            _src_datasets.append(_src_ds)
-
+                raise RuntimeError(f"The {src_datasets} is not a valid string or rio file") from None
+            self._src_datasets.append(_src_ds)
+        else:
+            for src_ds in src_datasets:
+                _src_ds = None
+                if isinstance(src_ds, str):
+                    with warnings.catch_warnings():
+                        warnings.filterwarnings('error')
+                        try:
+                            _src_ds = rasterio.open(src_ds)
+                        except NotGeoreferencedWarning:
+                            raise RuntimeError(
+                                f"The dataset at {src_ds} is ungeoreferenced, which is not allowed for building VRTs.") from None
+                elif isinstance(src_ds, DatasetReaderBase):
+                    if src_ds.mode != "r":
+                        raise RuntimeError("The non-reading mode is not allowed") from None
+                    _src_ds = src_ds
+                else:
+                    raise RuntimeError(f"The {src_ds} is not a valid string or rio file") from None
+                self._src_datasets.append(_src_ds)
 
         # Guard against invalid or unsupported resampling algorithms.
         try:
@@ -396,7 +458,7 @@ cdef class VRTReaderBase(DatasetReaderBase):
         except ValueError:
             raise ValueError(
                 "resampling must be one of: {0}".format(
-                    ", ".join(['Resampling.{0}'.format(r.name) for r in SUPPORTED_RESAMPLING])))
+                    ", ".join(['Resampling.{0}'.format(r.name) for r in SUPPORTED_RESAMPLING]))) from None
 
         self.mode = 'r'
         self.options = {}
@@ -415,58 +477,59 @@ cdef class VRTReaderBase(DatasetReaderBase):
             warnings.warn("Alpha addition not supported by GDAL 1.x")
             add_alpha = False
 
-        self.src_datasets = _src_datasets
         self.resolution = resolution
         self.resampling = Resampling.nearest
         self.src_nodata = self._src_datasets[0].nodata if src_nodata is DEFAULT_NODATA_FLAG else src_nodata
         self.vrt_nodata = self.src_nodata if vrt_nodata is DEFAULT_NODATA_FLAG else vrt_nodata
-        self.output_bounds = None
-        self.x_res = None
-        self.y_res = None
-        self.target_aligned_pixels = None
-        self.output_srs = None
-        self.hide_nodata = None
-        self.band_list = None
+        self.output_bounds = output_bounds
+        self.target_resolution = target_resolution
+        self.target_aligned_pixels = target_aligned_pixels
+        self.output_srs = output_srs
+        self.hide_nodata = hide_nodata
+        self.bands = bands
+        self.tile_index = tile_index
+        self.subdataset = subdataset
 
         cdef GDALDriverH driver = NULL
         cdef GDALBuildVRTOptions * vrt_options = NULL
 
         cdef GDALDatasetH* hds_list = NULL
         hds_list = <GDALDatasetH*>CPLMalloc(
-            len(_src_datasets) * sizeof(GDALDatasetH)
+            len(self._src_datasets) * sizeof(GDALDatasetH)
         )
-        for i, dataset in enumerate(_src_datasets):
-            hds_ptr = (<DatasetReaderBase?> _src_datasets[i]).handle()
+        for i, dataset in enumerate(self._src_datasets):
+            hds_ptr = (<DatasetReaderBase?> self._src_datasets[i]).handle()
             if hds_ptr == NULL:
                 raise RuntimeError("Dataset is NULL")
             hds_list[i] = hds_ptr
         str_vrt_options = form_vrt_options(resolution=self.resolution,
                                            outputBounds=self.output_bounds,
-                                           xRes=self.x_res,
-                                           yRes=self.y_res,
+                                           targetResolution=self.target_resolution,
                                            targetAlignedPixels=self.target_aligned_pixels,
                                            separate=separate,
-                                           bandList=self.band_list,
                                            addAlpha=add_alpha,
                                            resampleAlg=self.resampling,
                                            outputSRS=self.output_srs,
                                            allowProjectionDifference=allow_projection_difference,
                                            srcNodata=self.src_nodata,
                                            VRTNodata=self.vrt_nodata,
-                                           hideNodata=self.hide_nodata)
+                                           hideNodata=self.hide_nodata,
+                                           tileIndex=self.tile_index,
+                                           bandList=self.bands,
+                                           subDs=self.subdataset)
 
         str_vrt_options_ptr = CSLParseCommandLine(str_vrt_options)
         if str_vrt_options_ptr == NULL:
-            raise RuntimeError("String VRT options are NULL")
+            raise RuntimeError("String VRT options are NULL") from None
         vrt_options = build_vrt_options(str_vrt_options_ptr, NULL)
 
         if vrt_options == NULL:
-            raise RuntimeError("VRT options are NULL")
+            raise RuntimeError("VRT options are NULL") from None
 
 
         try:
             hds_vrt = build_vrt(pszDest=self.vrt_filename.encode('utf-8'),
-                                nSrcCount=len(self.src_datasets),
+                                nSrcCount=len(self._src_datasets),
                                 pahSrcDS=hds_list,
                                 papszSrcDSNames=NULL,
                                 psOptions=vrt_options)
@@ -474,7 +537,7 @@ cdef class VRTReaderBase(DatasetReaderBase):
             CSLDestroy(str_vrt_options_ptr)
             if vrt_options != NULL:
               GDALBuildVRTOptionsFree(vrt_options)
-            for __src_ds in _src_datasets:
+            for __src_ds in self._src_datasets:
                 __src_ds.close()
         try:
             if hds_vrt == NULL:
