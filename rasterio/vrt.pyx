@@ -408,12 +408,12 @@ cdef class VRTReaderBase(DatasetReaderBase):
 
         self.name = f"VRT {randomword(10)}"
         self.save_after_close = save_after_close
+        self.src_datasets = []
         if vrt_filename is None:
             self.vrt_filename = f"{self.name}.vrt"
         else:
             self.vrt_filename = vrt_filename
 
-        self._src_datasets = []
 
         if not isinstance(src_datasets, list):
             _src_ds = None
@@ -430,7 +430,7 @@ cdef class VRTReaderBase(DatasetReaderBase):
                 _src_ds = src_datasets
             else:
                 raise RuntimeError(f"The {src_datasets} is not a valid string or rio file") from None
-            self._src_datasets.append(_src_ds)
+            self.src_datasets.append(_src_ds)
         else:
             for src_ds in src_datasets:
                 _src_ds = None
@@ -448,7 +448,7 @@ cdef class VRTReaderBase(DatasetReaderBase):
                     _src_ds = src_ds
                 else:
                     raise RuntimeError(f"The {src_ds} is not a valid string or rio file") from None
-                self._src_datasets.append(_src_ds)
+                self.src_datasets.append(_src_ds)
 
         # Guard against invalid or unsupported resampling algorithms.
         try:
@@ -479,7 +479,7 @@ cdef class VRTReaderBase(DatasetReaderBase):
 
         self.resolution = resolution
         self.resampling = Resampling.nearest
-        self.src_nodata = self._src_datasets[0].nodata if src_nodata is DEFAULT_NODATA_FLAG else src_nodata
+        self.src_nodata = self.src_datasets[0].nodata if src_nodata is DEFAULT_NODATA_FLAG else src_nodata
         self.vrt_nodata = self.src_nodata if vrt_nodata is DEFAULT_NODATA_FLAG else vrt_nodata
         self.output_bounds = output_bounds
         self.target_resolution = target_resolution
@@ -495,10 +495,10 @@ cdef class VRTReaderBase(DatasetReaderBase):
 
         cdef GDALDatasetH* hds_list = NULL
         hds_list = <GDALDatasetH*>CPLMalloc(
-            len(self._src_datasets) * sizeof(GDALDatasetH)
+            len(self.src_datasets) * sizeof(GDALDatasetH)
         )
-        for i, dataset in enumerate(self._src_datasets):
-            hds_ptr = (<DatasetReaderBase?> self._src_datasets[i]).handle()
+        for i, dataset in enumerate(self.src_datasets):
+            hds_ptr = (<DatasetReaderBase?> self.src_datasets[i]).handle()
             if hds_ptr == NULL:
                 raise RuntimeError("Dataset is NULL")
             hds_list[i] = hds_ptr
@@ -529,7 +529,7 @@ cdef class VRTReaderBase(DatasetReaderBase):
 
         try:
             hds_vrt = build_vrt(pszDest=self.vrt_filename.encode('utf-8'),
-                                nSrcCount=len(self._src_datasets),
+                                nSrcCount=len(self.src_datasets),
                                 pahSrcDS=hds_list,
                                 papszSrcDSNames=NULL,
                                 psOptions=vrt_options)
@@ -537,7 +537,7 @@ cdef class VRTReaderBase(DatasetReaderBase):
             CSLDestroy(str_vrt_options_ptr)
             if vrt_options != NULL:
               GDALBuildVRTOptionsFree(vrt_options)
-            for __src_ds in self._src_datasets:
+            for __src_ds in self.src_datasets:
                 __src_ds.close()
         try:
             if hds_vrt == NULL:
