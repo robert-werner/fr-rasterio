@@ -51,7 +51,7 @@ with rasterio._loading.add_gdal_dll_directories():
         have_vsi_plugin = False
 
 __all__ = ['band', 'open', 'pad', 'Env', 'CRS']
-__version__ = "1.3a3"
+__version__ = "1.3a3-vrt"
 __gdal_version__ = gdal_version()
 
 # Rasterio attaches NullHandler to the 'rasterio' logger and its
